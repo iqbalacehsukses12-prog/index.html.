@@ -1,0 +1,362 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BireuenKu</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial;background:#f1f5f4;color:#18312d}
+header{background:#075e54;color:white;padding:20px;text-align:center}
+main{max-width:700px;margin:auto;padding:14px}
+.card{background:white;padding:16px;border-radius:14px;margin:12px 0;box-shadow:0 2px 8px #0001}
+input,select,textarea,button{width:100%;padding:12px;margin:7px 0;border:1px solid #ccd8d5;border-radius:8px;font-size:16px}
+button{background:#087c6d;color:white;border:0;font-weight:bold}
+button.secondary{background:#e5efed;color:#075e54}
+button.danger{background:#b83232}
+#map{height:300px;border-radius:10px;margin:10px 0}
+.small{font-size:13px;color:#60736f}
+.hidden{display:none}
+h2,h3{margin-top:5px}
+</style>
+</head>
+<body>
+<header>
+<h1>BireuenKu</h1>
+<p>Layanan masyarakat Bireuen</p>
+</header>
+<main>
+<section id="loginBox" class="card">
+<h2>Masuk BireuenKu</h2>
+<input id="email" type="email" placeholder="Email">
+<input id="password" type="password" placeholder="Password">
+<button onclick="login()">Masuk</button>
+<p id="loginInfo" class="small"></p>
+</section>
+
+<section id="appBox" class="hidden">
+<div class="card">
+<h3 id="welcome">Selamat datang</h3>
+<p id="roleInfo" class="small"></p>
+<button class="secondary" onclick="logout()">Keluar</button>
+</div>
+
+<section id="customerBox" class="hidden">
+<div class="card">
+<h2>Pesan Ojek</h2>
+<p class="small">Tekan tombol GPS untuk lokasi jemput, lalu sentuh peta untuk memilih tujuan.</p>
+<button onclick="getGPS()">Gunakan Lokasi Saya</button>
+<div id="map"></div>
+<p id="routeInfo">Belum memilih lokasi.</p>
+<h3 id="fareInfo">Tarif: Rp0</h3>
+<input id="pickupText" placeholder="Alamat jemput">
+<input id="destinationText" placeholder="Alamat tujuan">
+<textarea id="orderDetails" placeholder="Catatan tambahan (opsional)"></textarea>
+<button onclick="createOrder()">Pesan Sekarang</button>
+<p id="customerMessage" class="small"></p>
+</div>
+<div class="card">
+<h3>Pesanan Saya</h3>
+<div id="myOrders">Memuat pesanan...</div>
+</div>
+</section>
+
+<section id="driverBox" class="hidden">
+<div class="card">
+<h2>Pesanan Masuk</h2>
+<div id="driverOrders">Memuat pesanan...</div>
+</div>
+<div class="card">
+<h3>Riwayat dan Komisi</h3>
+<div id="driverHistory"></div>
+</div>
+<div class="card">
+<h3>Konfirmasi Pembayaran Komisi</h3>
+<input id="payAmount" type="number" placeholder="Jumlah pembayaran">
+<input id="payReference" placeholder="Nomor referensi transfer">
+<button onclick="submitPayment()">Kirim Konfirmasi</button>
+<p id="paymentMessage" class="small"></p>
+</div>
+</section>
+
+<section id="adminBox" class="hidden">
+<div class="card">
+<h2>Pengaturan Rekening Admin</h2>
+<input id="bankName" placeholder="Nama bank">
+<input id="accountName" placeholder="Nama pemilik rekening">
+<input id="accountNumber" placeholder="Nomor rekening">
+<button onclick="saveBank()">Simpan Rekening</button>
+<p id="bankMessage" class="small"></p>
+</div>
+<div class="card">
+<h2>Pembayaran Komisi Driver</h2>
+<div id="adminPayments"></div>
+</div>
+<div class="card">
+<h2>Daftar Pesanan</h2>
+<div id="adminOrders"></div>
+</div>
+</section>
+</section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const SUPABASE_URL="https://nsxpfpuvucvgysvggupb.supabase.co";
+const SUPABASE_KEY="sb_publishable_R-mgh-TyMI0B9J4tc0yffA_1B580hkU";
+const db=supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+
+let currentUser=null;
+let currentRole="";
+let map=null,start=null,end=null,routeKm=0,routeFare=0;
+let startMarker=null,endMarker=null,routeLine=null;
+
+const rupiah=n=>"Rp"+Number(n||0).toLocaleString("id-ID");
+const el=id=>document.getElementById(id);
+
+async function login(){
+ el("loginInfo").textContent="Memeriksa akun...";
+ const {data,error}=await db.auth.signInWithPassword({
+  email:el("email").value.trim(),
+  password:el("password").value
+ });
+ if(error){el("loginInfo").textContent=error.message;return;}
+ await loadApp(data.user);
+}
+
+async function loadApp(user){
+ currentUser=user;
+ const {data:profile,error}=await db.from("profiles")
+  .select("*").eq("user_id",user.id).single();
+ if(error||!profile){
+  el("loginInfo").textContent="Profil belum ditemukan. Hubungi admin.";
+  await db.auth.signOut();return;
+ }
+ currentRole=profile.role;
+ el("loginBox").classList.add("hidden");
+ el("appBox").classList.remove("hidden");
+ el("welcome").textContent="Halo, "+(profile.full_name||user.email);
+ el("roleInfo").textContent="Akun: "+currentRole;
+
+ ["customerBox","driverBox","adminBox"].forEach(id=>el(id).classList.add("hidden"));
+ if(currentRole==="customer"){
+  el("customerBox").classList.remove("hidden");
+  initMap();loadMyOrders();
+ }
+ if(currentRole==="driver"){
+  el("driverBox").classList.remove("hidden");
+  loadDriverOrders();loadDriverHistory();
+ }
+ if(currentRole==="admin"){
+  el("adminBox").classList.remove("hidden");
+  loadBank();loadAdminPayments();loadAdminOrders();
+ }
+}
+
+async function logout(){
+ await db.auth.signOut();
+ location.reload();
+}
+
+function initMap(){
+ if(map)return;
+ map=L.map("map").setView([5.203,96.701],13);
+ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{
+  attribution:"© OpenStreetMap"
+ }).addTo(map);
+ map.on("click",chooseDestination);
+ setTimeout(()=>map.invalidateSize(),500);
+}
+
+function getGPS(){
+ if(!navigator.geolocation){
+  el("routeInfo").textContent="GPS tidak didukung.";return;
+ }
+ el("routeInfo").textContent="Mencari lokasi GPS...";
+ navigator.geolocation.getCurrentPosition(pos=>{
+  start=[pos.coords.longitude,pos.coords.latitude];
+  if(startMarker)map.removeLayer(startMarker);
+  startMarker=L.marker([start[1],start[0]]).addTo(map).bindPopup("Lokasi jemput").openPopup();
+  map.setView([start[1],start[0]],15);
+  el("pickupText").value="Lokasi GPS saya";
+  el("routeInfo").textContent="Lokasi jemput ditemukan. Sentuh peta untuk memilih tujuan.";
+ },err=>{
+  el("routeInfo").textContent="GPS gagal. Izinkan akses lokasi di browser.";
+ },{enableHighAccuracy:true});
+}
+
+async function chooseDestination(e){
+ if(!start){el("routeInfo").textContent="Gunakan GPS dahulu.";return;}
+ end=[e.latlng.lng,e.latlng.lat];
+ if(endMarker)map.removeLayer(endMarker);
+ endMarker=L.marker([end[1],end[0]]).addTo(map).bindPopup("Tujuan").openPopup();
+ el("routeInfo").textContent="Menghitung jarak jalan...";
+ try{
+  const url="https://router.project-osrm.org/route/v1/driving/"+
+   start.join(",")+";"+end.join(",")+"?overview=full&geometries=geojson";
+  const response=await fetch(url);
+  const data=await response.json();
+  if(data.code!=="Ok")throw Error("Rute tidak ditemukan");
+  routeKm=data.routes[0].distance/1000;
+  routeFare=Math.max(8000,Math.round(routeKm*8000));
+  if(routeLine)map.removeLayer(routeLine);
+  routeLine=L.geoJSON(data.routes[0].geometry).addTo(map);
+  map.fitBounds(routeLine.getBounds());
+  el("routeInfo").textContent="Jarak jalan: "+routeKm.toFixed(2)+" km";
+  el("fareInfo").textContent="Tarif: "+rupiah(routeFare);
+  el("destinationText").value="Tujuan dari peta";
+ }catch(err){
+  el("routeInfo").textContent="Rute gagal dihitung. Coba pilih tujuan lagi.";
+ }
+}
+
+async function createOrder(){
+ if(!start||!end||!routeKm){
+  el("customerMessage").textContent="Tentukan lokasi jemput dan tujuan di peta dahulu.";return;
+ }
+ const {error}=await db.from("orders").insert({
+  customer_id:currentUser.id,
+  service_type:"Ojek",
+  pickup_address:el("pickupText").value||"Lokasi GPS",
+  destination_address:el("destinationText").value||"Tujuan peta",
+  details:el("orderDetails").value,
+  status:"pending",
+  distance_km:Number(routeKm.toFixed(2)),
+  pickup_lat:start[1],pickup_lng:start[0],
+  destination_lat:end[1],destination_lng:end[0]
+ });
+ if(error){el("customerMessage").textContent="Gagal: "+error.message;return;}
+ el("customerMessage").textContent="Pesanan berhasil dikirim!";
+ loadMyOrders();
+}
+
+async function loadMyOrders(){
+ const {data,error}=await db.from("orders").select("*")
+  .eq("customer_id",currentUser.id).order("created_at",{ascending:false});
+ if(error){el("myOrders").textContent=error.message;return;}
+ el("myOrders").innerHTML=(data||[]).map(o=>
+  `<div class="card"><b>${o.service_type}</b><p>${o.pickup_address} → ${o.destination_address}</p>
+  <p>Status: ${o.status} | ${rupiah(o.fare_amount)}</p>
+  ${o.status==="completed"&&!o.customer_confirmed_at?
+  `<button onclick="confirmOrder('${o.id}')">Konfirmasi Selesai</button>`:""}</div>`
+ ).join("")||"Belum ada pesanan.";
+}
+
+async function confirmOrder(id){
+ const {error}=await db.from("orders").update({
+  customer_confirmed_at:new Date().toISOString()
+ }).eq("id",id);
+ alert(error?error.message:"Konfirmasi selesai dikirim.");
+ loadMyOrders();
+}
+
+async function loadDriverOrders(){
+ const {data,error}=await db.from("orders").select("*")
+  .eq("status","pending").order("created_at",{ascending:true});
+ if(error){el("driverOrders").textContent=error.message;return;}
+ el("driverOrders").innerHTML=(data||[]).map(o=>
+  `<div class="card"><b>Pesanan Ojek</b><p>${o.pickup_address} → ${o.destination_address}</p>
+  <p>Tarif: ${rupiah(o.fare_amount)}</p>
+  <button onclick="acceptOrder('${o.id}')">Ambil Pesanan</button></div>`
+ ).join("")||"Belum ada pesanan masuk.";
+}
+
+async function acceptOrder(id){
+ const {error}=await db.from("orders").update({
+  driver_id:currentUser.id,status:"accepted"
+ }).eq("id",id).eq("status","pending");
+ alert(error?error.message:"Pesanan berhasil diambil.");
+ loadDriverOrders();
+}
+
+async function loadDriverHistory(){
+ const {data,error}=await db.from("orders").select("*")
+  .eq("driver_id",currentUser.id).order("created_at",{ascending:false});
+ if(error){el("driverHistory").textContent=error.message;return;}
+ let total=0;
+ el("driverHistory").innerHTML=(data||[]).map(o=>{
+  if(o.status==="completed")total+=Number(o.fare_amount||0)*0.15;
+  return `<div class="card"><p>${o.pickup_address} → ${o.destination_address}</p>
+  <p>Status: ${o.status} | ${rupiah(o.fare_amount)}</p>
+  ${o.status==="accepted"?`<button onclick="finishOrder('${o.id}')">Selesaikan Pesanan</button>`:""}</div>`;
+ }).join("")||"Belum ada riwayat.";
+ el("driverHistory").innerHTML+="<h3>Total komisi 15%: "+rupiah(total)+"</h3>";
+}
+
+async function finishOrder(id){
+ const {error}=await db.from("orders").update({
+  status:"completed",completed_at:new Date().toISOString(),
+  driver_confirmed_at:new Date().toISOString()
+ }).eq("id",id).eq("driver_id",currentUser.id);
+ alert(error?error.message:"Pesanan ditandai selesai.");
+ loadDriverHistory();
+}
+
+async function submitPayment(){
+ const amount=Number(el("payAmount").value);
+ if(!amount||amount<=0){el("paymentMessage").textContent="Masukkan jumlah pembayaran.";return;}
+ const {error}=await db.from("commission_payments").insert({
+  driver_id:currentUser.id,amount,
+  payment_method:"transfer",
+  reference_number:el("payReference").value
+ });
+ el("paymentMessage").textContent=error?error.message:"Konfirmasi pembayaran dikirim.";
+}
+
+async function loadBank(){
+ const {data}=await db.from("admin_payment_settings").select("*").eq("id",1).maybeSingle();
+ if(data){
+  el("bankName").value=data.bank_name||"";
+  el("accountName").value=data.account_name||"";
+  el("accountNumber").value=data.account_number||"";
+ }
+}
+
+async function saveBank(){
+ const {error}=await db.from("admin_payment_settings").upsert({
+  id:1,bank_name:el("bankName").value,
+  account_name:el("accountName").value,
+  account_number:el("accountNumber").value,
+  updated_at:new Date().toISOString()
+ });
+ el("bankMessage").textContent=error?error.message:"Rekening berhasil disimpan.";
+}
+
+async function loadAdminPayments(){
+ const {data,error}=await db.from("commission_payments").select("*")
+  .order("created_at",{ascending:false});
+ if(error){el("adminPayments").textContent=error.message;return;}
+ el("adminPayments").innerHTML=(data||[]).map(p=>
+  `<div class="card">Driver: ${p.driver_id}<p>${rupiah(p.amount)} — ${p.status}</p>
+  ${p.status==="pending"?`<button onclick="reviewPayment('${p.id}','approved')">Setujui</button>
+  <button class="danger" onclick="reviewPayment('${p.id}','rejected')">Tolak</button>`:""}</div>`
+ ).join("")||"Belum ada pembayaran.";
+}
+
+async function reviewPayment(id,status){
+ const {error}=await db.from("commission_payments").update({
+  status,reviewed_at:new Date().toISOString(),reviewed_by:currentUser.id
+ }).eq("id",id);
+ alert(error?error.message:"Status pembayaran diperbarui.");
+ loadAdminPayments();
+}
+
+async function loadAdminOrders(){
+ const {data,error}=await db.from("orders").select("*")
+  .order("created_at",{ascending:false}).limit(100);
+ if(error){el("adminOrders").textContent=error.message;return;}
+ el("adminOrders").innerHTML=(data||[]).map(o=>
+  `<div class="card"><b>${o.service_type}</b><p>${o.pickup_address} → ${o.destination_address}</p>
+  <p>Status: ${o.status} | Tarif: ${rupiah(o.fare_amount)}</p></div>`
+ ).join("")||"Belum ada pesanan.";
+}
+
+db.auth.getSession().then(({data})=>{
+ if(data.session)loadApp(data.session.user);
+});
+</script>
+</body>
+</html>
